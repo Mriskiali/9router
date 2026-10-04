@@ -1,0 +1,17 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# custom-server.js reads process.env.PORT and rewrites argv --port to match, so
+# Railway's injected PORT wins over the Dockerfile default of 20128.
+# /api/health is an anonymous GET returning {"ok":true} with CORS: *, so the
+# probe needs no credentials.
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# SQLite lives on a volume at /app/data. Two replicas would open the same file
+# from two containers and corrupt it, so the service must stay single-replica.
+numReplicas = 1
