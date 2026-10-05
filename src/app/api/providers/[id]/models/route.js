@@ -5,6 +5,7 @@ import { GEMINI_CONFIG, ZED_HOSTED_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
+import { getCustomModels } from "@/models";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
@@ -166,6 +167,22 @@ function buildQoderModelsResolver(providerId) {
     },
   };
 }
+
+// Last-known model list for a connection: registry catalog first (static
+// providers), then whatever the DB cached from a previous successful fetch
+// (custom anthropic/openai-compatible nodes have no registry entry).
+const resolveFallbackModels = async (connection) => {
+  const staticModels = getModelsByProviderId(connection.provider);
+  if (staticModels.length) return staticModels;
+  try {
+    const cached = await getCustomModels();
+    return cached
+      .filter((m) => m.providerAlias === connection.provider)
+      .map((m) => ({ ...m, name: m.name || m.id }));
+  } catch {
+    return [];
+  }
+};
 
 // Provider models endpoints configuration
 const PROVIDER_MODELS_CONFIG = {
@@ -545,30 +562,44 @@ export async function GET(request, { params }) {
         return NextResponse.json({ error: "No base URL configured for OpenAI compatible provider" }, { status: 400 });
       }
       const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${connection.apiKey}`,
-        },
-      });
+      let warning;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${connection.apiKey}`,
+          },
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
-        return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
-          { status: response.status }
-        );
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.log(`Error fetching models from ${connection.provider}:`, errorText);
+          warning = `Failed to fetch models: ${response.status}`;
+        } else {
+          const data = await response.json();
+          const models = data.data || data.models || [];
+          return NextResponse.json({
+            provider: connection.provider,
+            connectionId: connection.id,
+            models
+          });
+        }
+      } catch (error) {
+        warning = `Failed to fetch models: ${error.message}`;
+        console.log(`Timeout/error fetching models from ${connection.provider}:`, error.message);
       }
-
-      const data = await response.json();
-      const models = data.data || data.models || [];
-
+      // Fallback to static catalog so UI never spins forever
+      const staticModels = await resolveFallbackModels(connection);
       return NextResponse.json({
         provider: connection.provider,
         connectionId: connection.id,
-        models
+        models: staticModels,
+        warning: warning || "Provider unreachable; using static catalog."
       });
     }
 
@@ -584,34 +615,48 @@ export async function GET(request, { params }) {
       }
 
       const url = `${baseUrl}/models`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": connection.apiKey,
-          "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${connection.apiKey}`
-        },
-      });
+      let warning;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": connection.apiKey,
+            "anthropic-version": "2023-06-01",
+            "Authorization": `Bearer ${connection.apiKey}`
+          },
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
-        return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
-          { status: response.status }
-        );
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.log(`Error fetching models from ${connection.provider}:`, errorText);
+          warning = `Failed to fetch models: ${response.status}`;
+        } else {
+          const data = await response.json();
+          const models = data.data || data.models || [];
+          return NextResponse.json({
+            provider: connection.provider,
+            connectionId: connection.id,
+            models
+          });
+        }
+      } catch (error) {
+        warning = `Failed to fetch models: ${error.message}`;
+        console.log(`Timeout/error fetching models from ${connection.provider}:`, error.message);
       }
-
-      const data = await response.json();
-      const models = data.data || data.models || [];
-
+      const staticModels = await resolveFallbackModels(connection);
       return NextResponse.json({
         provider: connection.provider,
         connectionId: connection.id,
-        models
+        models: staticModels,
+        warning: warning || "Provider unreachable; using static catalog."
       });
     }
+
 
     const config = PROVIDER_MODELS_CONFIG[connection.provider];
     if (!config) {
@@ -663,24 +708,37 @@ export async function GET(request, { params }) {
       fetchOptions.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(url, fetchOptions);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log(`Error fetching models from ${connection.provider}:`, errorText);
-      return NextResponse.json(
-        { error: `Failed to fetch models: ${response.status}` },
-        { status: response.status }
-      );
+    let genericWarning;
+    let models;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`Error fetching models from ${connection.provider}:`, errorText);
+        genericWarning = `Failed to fetch models: ${response.status}`;
+      } else {
+        const data = await response.json();
+        models = config.parseResponse(data);
+      }
+    } catch (error) {
+      genericWarning = `Failed to fetch models: ${error.message}`;
+      console.log(`Timeout/error fetching models from ${connection.provider}:`, error.message);
     }
-
-    const data = await response.json();
-    const models = config.parseResponse(data);
-
+    if (models && models.length) {
+      return NextResponse.json({
+        provider: connection.provider,
+        connectionId: connection.id,
+        models
+      });
+    }
     return NextResponse.json({
       provider: connection.provider,
       connectionId: connection.id,
-      models
+      models: await resolveFallbackModels(connection),
+      warning: genericWarning || "Provider unreachable; using static catalog."
     });
   } catch (error) {
     console.log("Error fetching provider models:", error);
