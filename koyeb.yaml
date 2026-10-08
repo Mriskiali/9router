@@ -1,0 +1,59 @@
+# Koyeb service definition for 9router.
+# Deploy:  koyeb app init 9router --git github.com/Mriskiali/9router --git-branch master \
+#            --file koyeb.yaml
+# Or paste this YAML in the Koyeb console (Deploy -> paste service definition).
+#
+# Health probe: /api/health is an anonymous GET returning {"ok":true} with CORS:*,
+# so no credentials are needed.
+#
+# SQLite lives at /app/data. Two instances would open the same file and corrupt it,
+# so the count MUST stay 1.
+name: 9router
+services:
+  - name: 9router
+    type: web
+    instance_type: free
+    regions:
+      - fra
+    ports:
+      - port: 8000
+        protocol: http
+      - port: 20128
+        protocol: http
+    routes:
+      - path: /
+        port: 20128
+    scaling:
+      min: 1
+      max: 1
+    health_checks:
+      - grace_period: 60
+        interval: 30
+        restart_limit: 5
+        timeout: 10
+        tcp:
+          port: 20128
+    env:
+      - key: NODE_ENV
+        value: production
+      - key: HOSTNAME
+        value: 0.0.0.0
+      - key: PORT
+        value: "20128"
+      - key: DATA_DIR
+        value: /app/data
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+      - key: ENABLE_REQUEST_LOGS
+        value: "false"
+      - key: OBSERVABILITY_ENABLED
+        value: "true"
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      # --- secrets: set these in the Koyeb console, NOT here ---
+      # JWT_SECRET         (64-char random)
+      # API_KEY_SECRET     (64-char random)
+      # MACHINE_ID_SALT    (32-char random)
+      # INITIAL_PASSWORD   (strong password)
+      # BASE_URL / NEXT_PUBLIC_BASE_URL / CLOUD_URL / NEXT_PUBLIC_CLOUD_URL
+      #   -> https://<your-app>.koyeb.app   (fill in AFTER the first deploy)
